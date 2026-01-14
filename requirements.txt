@@ -1,3 +1,4 @@
-pyTelegramBotAPI
-beautifulsoup4
+python-telegram-bot[webhooks]
 requests
+beautifulsoup4
+apscheduler
