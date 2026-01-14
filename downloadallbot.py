@@ -1,118 +1,129 @@
-import telebot
-import requests
-import re
-from bs4 import BeautifulSoup
-from telebot import types
 import os
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+from io import BytesIO
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# --- الإعدادات الأساسية ---
-TOKEN = "8112995930:AAHJ4OqNLk-9y7A1pUPELQVOhAmerczeIR8"
-bot = telebot.TeleBot(TOKEN)
-user_data = {}
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+RENDER_URL = "https://webreconbot.onrender.com/" 
 
-# --- دالة فحص محتوى الموقع وملفاته ---
-def get_site_data(url):
+admin_paths = ["admin","admin/login","wp-admin","administrator","cpanel","panel","dashboard"]
+user_urls = {}
+
+# وظيفة منع النوم (Keep-alive)
+def keep_alive():
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        combined_content = response.text # محتوى HTML الأساسي
-        
-        # استخراج روابط ملفات JS, CSS, PHP, JSON
-        assets = []
-        for tag in soup.find_all(['script', 'link', 'a']):
-            link = tag.get('src') or tag.get('href')
-            if link:
-                if link.startswith('/'):
-                    link = url.rstrip('/') + link
-                if any(link.endswith(ext) for ext in ['.js', '.css', '.php', '.json']):
-                    assets.append(link)
-        
-        # فحص أول 15 ملفاً لضمان السرعة
-        for asset_url in list(set(assets))[:15]:
-            try:
-                asset_res = requests.get(asset_url, headers=headers, timeout=5)
-                combined_content += f"\n\n/* --- Content from: {asset_url} --- */\n"
-                combined_content += asset_res.text
-            except:
-                continue
-        return combined_content
+        requests.get(RENDER_URL, timeout=10)
+        print("Keep-alive: Ping successful.")
     except Exception as e:
-        return f"Error: {str(e)}"
+        print(f"Keep-alive error: {e}")
 
-# --- أوامر البوت ---
-@bot.message_handler(commands=['start'])
-def start(message):
-    welcome_text = (
-        "صلى على نبي محمد ﷺ\n\n"
-        "مرحباً بك في بوت URL INFORMATION 🌐\n"
-        "أرسل رابط الموقع الذي تريد فحصه الآن مباشرة:"
-    )
-    bot.reply_to(message, welcome_text)
+scheduler = BackgroundScheduler()
+scheduler.add_job(keep_alive, "interval", minutes=10)
+scheduler.start()
 
-@bot.message_handler(func=lambda message: True)
-def handle_link(message):
-    url = message.text.strip()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # تم تحديث حقوق المطور هنا
+    welcome_text = """👋 مرحبا بك في بوت جمع معلومات المواقع..
+
+🛠️ إعداد وتطوير: هيثم محمود الجمال
+🔗 @albashekaljmaal3
+
+🌐 ادخل رابط الموقع المستهدف المراد فحصه:
+"""
+    await update.message.reply_text(welcome_text)
+
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
     if not url.startswith("http"):
-        bot.reply_to(message, "❌ الرابط غير صحيح! يجب أن يبدأ بـ http أو https")
+        url = "http://" + url
+    user_urls[update.effective_user.id] = url
+
+    keyboard = [
+        [InlineKeyboardButton("🌐 معلومات الموقع", callback_data="info")],
+        [InlineKeyboardButton("🔗 روابط الموقع", callback_data="links")],
+        [InlineKeyboardButton("🛡️ Admin Panel", callback_data="admin")],
+        [InlineKeyboardButton("☁️ Cloudflare", callback_data="cloudflare")],
+        [InlineKeyboardButton("🧩 نوع النظام", callback_data="cms")],
+        [InlineKeyboardButton("🌍 Subdomains", callback_data="subs")]
+    ]
+    await update.message.reply_text(f"تم استقبال الرابط: {url}\nاختر نوع الفحص:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def send_txt(chat_id, context, text):
+    file = BytesIO()
+    file.write(text.encode("utf-8"))
+    file.seek(0)
+    await context.bot.send_document(chat_id=chat_id, document=file, filename="scan_result.txt")
+
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    url = user_urls.get(query.from_user.id)
+    if not url:
+        await query.message.reply_text("يرجى إرسال الرابط مرة أخرى.")
         return
 
-    user_data[message.chat.id] = url
-    
-    markup = types.InlineKeyboardMarkup()
-    btn1 = types.InlineKeyboardButton("بحث عميق Admin Panel 🛠", callback_data="scan_admin")
-    btn2 = types.InlineKeyboardButton("استخراج الروابط URL Extractor 🔗", callback_data="scan_urls")
-    markup.add(btn1)
-    markup.add(btn2)
-    
-    bot.reply_to(message, f"🔗 الرابط المستهدف: {url}\nاختر نوع الفحص المطلوب أدناه:", reply_markup=markup)
+    domain = urlparse(url).netloc
+    result = ""
 
-# --- معالجة طلبات الفحص ---
-@bot.callback_query_handler(func=lambda call: call.data in ["scan_admin", "scan_urls"])
-def execute_scan(call):
-    bot.answer_callback_query(call.id, "⏳ جاري بدء الفحص...")
-    
-    target_url = user_data.get(call.message.chat.id)
-    if not target_url:
-        bot.send_message(call.message.chat.id, "❌ حدث خطأ، يرجى إعادة إرسال الرابط.")
-        return
-
-    bot.edit_message_text(f"🚀 جاري الفحص العميق واستخراج البيانات من الموقع...\nيرجى الانتظار.", 
-                          call.message.chat.id, call.message.message_id)
-    
-    site_content = get_site_data(target_url)
-    domain_name = target_url.split("//")[-1].split("/")[0].replace(".", "_")
-
-    if call.data == "scan_admin":
-        admin_patterns = [r'admin', r'login', r'panel', r'wp-admin', r'dashboard', r'manage', r'auth', r'control']
-        found_paths = []
-        for p in admin_patterns:
-            matches = re.findall(r'/[^"\'\s]*' + p + r'[^"\'\s]*', site_content, re.IGNORECASE)
-            found_paths.extend(matches)
+    try:
+        if query.data == "info":
+            data = requests.get(f"http://ip-api.com/json/{domain}", timeout=15).json()
+            result = f"IP: {data.get('query')}\nCountry: {data.get('country')}\nISP: {data.get('isp')}\nCity: {data.get('city')}"
         
-        found_paths = list(set(found_paths))
-        file_path = f"{domain_name}_admin_panel.js"
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(f"// Scan Results for Admin Panels: {target_url}\n\n")
-            f.write("\n".join(found_paths) if found_paths else "// No results found.")
-        
-        with open(file_path, "rb") as doc:
-            bot.send_document(call.message.chat.id, doc, caption=f"✅ نتائج Admin Panel لـ {domain_name}")
-        os.remove(file_path)
+        elif query.data == "links":
+            r = requests.get(url, timeout=15)
+            soup = BeautifulSoup(r.text, "html.parser")
+            links = set(urljoin(url, a['href']) for a in soup.find_all("a", href=True))
+            result = "روابط الموقع المكتشفة:\n" + "\n".join(list(links)[:50])
 
-    elif call.data == "scan_urls":
-        extracted_urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-f_A-F][0-9a-f_A-F]))+', site_content)
-        extracted_urls = list(set(extracted_urls))
-        
-        file_path = f"{domain_name}_url_extractor.js"
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(f"// Extracted URLs from: {target_url}\n\n")
-            f.write("\n".join(extracted_urls) if extracted_urls else "// No URLs found.")
-            
-        with open(file_path, "rb") as doc:
-            bot.send_document(call.message.chat.id, doc, caption=f"✅ الروابط المستخرجة لـ {domain_name}")
-        os.remove(file_path)
+        elif query.data == "admin":
+            found = []
+            for p in admin_paths:
+                test = f"{url.rstrip('/')}/{p}"
+                try:
+                    res = requests.get(test, timeout=5)
+                    if res.status_code == 200: found.append(test)
+                except: pass
+            result = "لوحات التحكم المكتشفة:\n" + ("\n".join(found) if found else "لم يتم العثور على لوحات مشهورة")
 
-# --- تشغيل البوت ---
-print("--- البوت الآن يعمل بدون اشتراك إجباري ---")
-bot.infinity_polling()
+        elif query.data == "cloudflare":
+            h = requests.get(url, timeout=15).headers
+            result = "Cloudflare: مفعل" if "cloudflare" in str(h).lower() else "Cloudflare: غير مكتشف"
+
+        elif query.data == "cms":
+            r = requests.get(url, timeout=15).text
+            result = "النظام: WordPress" if "wp-content" in r else "النظام: غير معروف أو برمجة خاصة"
+
+        elif query.data == "subs":
+            crt = requests.get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=20).json()
+            subs = list(set([i["name_value"] for i in crt]))
+            result = "النطاقات الفرعية (Subdomains):\n" + "\n".join(subs[:40])
+
+    except Exception as e:
+        result = f"حدث خطأ أثناء العملية: {e}"
+
+    await send_txt(query.message.chat_id, context, result)
+
+def main():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    application.add_handler(CallbackQueryHandler(buttons))
+
+    port = int(os.environ.get("PORT", 10000))
+    
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=BOT_TOKEN,
+        webhook_url=f"{RENDER_URL}{BOT_TOKEN}"
+    )
+
+if __name__ == "__main__":
+    main()
