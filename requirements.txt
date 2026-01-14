@@ -1,4 +1,3 @@
-telebot
-yt_dlp
-BeautifulSoup
+pyTelegramBotAPI
+beautifulsoup4
 requests
