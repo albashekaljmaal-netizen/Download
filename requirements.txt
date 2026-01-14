@@ -1,2 +1,4 @@
 telebot
 yt_dlp
+BeautifulSoup
+requests
